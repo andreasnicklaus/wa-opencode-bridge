@@ -9,36 +9,47 @@ A tiny HTTP bridge that connects WhatsApp to [opencode](https://opencode.ai) run
 ## Quick start
 
 1. **Set up the two upstreams**
-
    - **OpenWA** — a WhatsApp gateway with the REST API and MCP enabled. You need the session's base URL (`https://…/api/sessions/<session-uuid>`) and an API key.
    - **opencode server** — run `opencode serve` (optionally with `OPENCODE_SERVER_PASSWORD` set for Basic auth) so `http://host:4096` responds. The bridge talks to the `POST /session` and `/session/<id>/message` endpoints.
 
-2. **Configure via environment variables** — see [Configuration](#configuration). At minimum:
+2. **Write a production `docker-compose.yml`**
 
-   ```bash
-   export OPENWA_BASE_URL="https://openwa.example.com/api/sessions/<session-uuid>"
-   export OPENWA_API_KEY="your-openwa-api-key"
-   export OPENCODE_BASE_URL="http://localhost:4096"
+   A `compose.yaml` for production deployment pulls the published image from the GitHub Container Registry, wires the env vars, and persists state in a volume:
+
+   ```yaml
+   services:
+     wa-opencode-bridge:
+       image: ghcr.io/andreasnicklaus/wa-opencode-bridge:latest
+       restart: unless-stopped
+       ports:
+         - "3210:3210"
+       environment:
+         OPENWA_BASE_URL: "https://openwa.example.com/api/sessions/${OPENWA_SESSION_ID}"
+         OPENWA_API_KEY: "${OPENWA_API_KEY}"
+         OPENCODE_BASE_URL: "http://opencode.example.com:4096"
+         MAX_MESSAGES_PER_DAY: "100"
+         PROMPT_TIMEOUT_MS: "300000"
+         STILL_WORKING_AFTER_MS: "60000"
+       volumes:
+         - wa-opencode-bridge-data:/data
+
+   volumes:
+     wa-opencode-bridge-data:
    ```
 
-3. **Run it**
-
-   ```bash
-   npm install
-   npm start
-   ```
-
-   or with Docker:
+   Fill in the required values in a `.env` file next to it (or inline), then start it:
 
    ```bash
    docker compose up -d
    ```
 
-4. **Point OpenWA's webhook at the bridge**
+   See [Configuration](#configuration) for the full list of variables.
+
+3. **Point OpenWA's webhook at the bridge**
 
    Register `https://your-bridge.example.com/webhook/wa-message` as the incoming-message webhook for the session. The bridge acks with `200` immediately and processes the message asynchronously.
 
-5. **Give the opencode agent WhatsApp MCP tools** — the bridge's prompt tells the agent to look up chat history and send replies via its WhatsApp MCP tools. Configure those (e.g. a remote MCP server in `opencode.json`); without them the agent can't deliver a reply.
+4. **Give the opencode agent WhatsApp MCP tools** — the bridge's prompt tells the agent to look up chat history and send replies via its WhatsApp MCP tools. Configure those (e.g. a remote MCP server in `opencode.json`); without them the agent can't deliver a reply.
 
 Send a WhatsApp message to the session's number and the agent should reply.
 
@@ -57,19 +68,19 @@ Everything is stateless except the per-day usage counters persisted in the `DATA
 
 ## Configuration
 
-| Variable | Default | Description |
-| --- | --- | --- |
-| `OPENWA_BASE_URL` | *(required)* | OpenWA session base URL, e.g. `https://openwa.example.com/api/sessions/<session-uuid>`. |
-| `OPENWA_API_KEY` | *(required)* | Bearer token for the OpenWA REST API. |
-| `OPENCODE_BASE_URL` | *(required)* | opencode server URL, e.g. `http://opencode:4096`. |
-| `OPENCODE_AGENT` | *(none)* | Optional named agent/mode to use for the bot, e.g. `whatsapp-assistant`. |
-| `OPENCODE_SERVER_USERNAME` | `opencode` | Basic-auth username for `opencode serve`. |
-| `OPENCODE_SERVER_PASSWORD` | *(empty)* | Basic-auth password; only sent when set. |
-| `ALLOWED_SENDERS` | *(empty = allow all)* | Comma-separated phone numbers (no `+`), e.g. `4915112345678,491701234567`. |
-| `MAX_MESSAGES_PER_DAY` | `100` | Per-sender daily message cap. |
-| `PROMPT_TIMEOUT_MS` | `60000` | Max time to wait for the agent before erroring. |
-| `STILL_WORKING_AFTER_MS` | `15000` | How long before a "Still working on it…" interim message is sent. |
-| `DATA_DIR` | `/data` | Directory for `log.jsonl` and `usage.json`. |
+| Variable                   | Default               | Description                                                                             |
+| -------------------------- | --------------------- | --------------------------------------------------------------------------------------- |
+| `OPENWA_BASE_URL`          | _(required)_          | OpenWA session base URL, e.g. `https://openwa.example.com/api/sessions/<session-uuid>`. |
+| `OPENWA_API_KEY`           | _(required)_          | Bearer token for the OpenWA REST API.                                                   |
+| `OPENCODE_BASE_URL`        | _(required)_          | opencode server URL, e.g. `http://opencode:4096`.                                       |
+| `OPENCODE_AGENT`           | _(none)_              | Optional named agent/mode to use for the bot, e.g. `whatsapp-assistant`.                |
+| `OPENCODE_SERVER_USERNAME` | `opencode`            | Basic-auth username for `opencode serve`.                                               |
+| `OPENCODE_SERVER_PASSWORD` | _(empty)_             | Basic-auth password; only sent when set.                                                |
+| `ALLOWED_SENDERS`          | _(empty = allow all)_ | Comma-separated phone numbers (no `+`), e.g. `4915112345678,491701234567`.              |
+| `MAX_MESSAGES_PER_DAY`     | `100`                 | Per-sender daily message cap.                                                           |
+| `PROMPT_TIMEOUT_MS`        | `60000`               | Max time to wait for the agent before erroring.                                         |
+| `STILL_WORKING_AFTER_MS`   | `15000`               | How long before a "Still working on it…" interim message is sent.                       |
+| `DATA_DIR`                 | `/data`               | Directory for `log.jsonl` and `usage.json`.                                             |
 
 A ready-made `docker-compose.yml` is included that wires up the env vars (with `OPENWA_SESSION_ID`, `OPENWA_API_KEY`, and `OPENCODE_SERVER_PASSWORD` read from your `.env`) and mounts `./data:/data`.
 
