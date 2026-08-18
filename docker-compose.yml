@@ -6,16 +6,17 @@ services:
     ports:
       - "3210:3210"
     environment:
-      OPENWA_BASE_URL: "https://openwa.andreasnicklaus.de/api/sessions/${OPENWA_SESSION_ID}"
+      OPENWA_BASE_URL: "https://openwa.andreasnicklaus.de"
       OPENWA_API_KEY: "${OPENWA_API_KEY}"
+      OPENWA_SESSION_ID: "${OPENWA_SESSION_ID}"
       OPENCODE_BASE_URL: "http://opencode.andreasnicklaus.de"
       OPENCODE_SERVER_USERNAME: "${OPENCODE_SERVER_USERNAME:-opencode}"
       OPENCODE_SERVER_PASSWORD: "${OPENCODE_SERVER_PASSWORD}"
       # OPENCODE_AGENT: "whatsapp-assistant"     # optional: a dedicated agent/mode
       # ALLOWED_SENDERS: "4915112345678,491701234567"
-      MAX_MESSAGES_PER_DAY: "100"
-      PROMPT_TIMEOUT_MS: "300000"
-      STILL_WORKING_AFTER_MS: "60000"
+      # MAX_MESSAGES_PER_DAY: "100"
+      # PROMPT_TIMEOUT_MS: "300000"
+      # STILL_WORKING_AFTER_MS: "60000"  # uncomment to send "Still working on it…" after 60s
       # KEEP_SESSIONS: "1"          # uncomment to keep sessions for debugging
     volumes:
       - ./data:/data

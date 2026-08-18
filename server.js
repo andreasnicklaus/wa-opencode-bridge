@@ -5,8 +5,9 @@ import path from "path";
 // ---------- Config ----------
 const {
   PORT = 3210,
-  OPENWA_BASE_URL,          // e.g. http://openwa:2785/api/sessions/<session-uuid>
+  OPENWA_BASE_URL,          // e.g. https://openwa.example.com (without /api/sessions/<uuid>)
   OPENWA_API_KEY,
+  OPENWA_SESSION_ID,        // WhatsApp session UUID needed for MCP tool calls
   OPENCODE_BASE_URL,        // e.g. http://opencode:4096
   OPENCODE_AGENT,           // optional named agent/mode to use for this bot
   OPENCODE_SERVER_USERNAME = "opencode",
@@ -14,25 +15,18 @@ const {
   KEEP_SESSIONS,            // if set, don't delete sessions after each message (for debugging)
   ALLOWED_SENDERS = "",     // comma-separated phone numbers (no +, e.g. "4915112345678")
   MAX_MESSAGES_PER_DAY = 100,
-  PROMPT_TIMEOUT_MS = 60000,
-  STILL_WORKING_AFTER_MS = 15000,
+  PROMPT_TIMEOUT_MS = 300000,
+  STILL_WORKING_AFTER_MS,  // if set, send "Still working on it…" after this many ms
   DATA_DIR = "/data",
 } = process.env;
 
-if (!OPENWA_BASE_URL || !OPENCODE_BASE_URL) {
-  console.error("OPENWA_BASE_URL and OPENCODE_BASE_URL are required");
+if (!OPENWA_BASE_URL || !OPENWA_SESSION_ID || !OPENCODE_BASE_URL) {
+  console.error("OPENWA_BASE_URL, OPENWA_SESSION_ID, and OPENCODE_BASE_URL are required");
   process.exit(1);
 }
 
-// The OpenWA base URL ends with `/api/sessions/<uuid>`; strip a trailing
-// slash and flag the classic config mistake of a missing session id.
-const openwaBase = OPENWA_BASE_URL.replace(/\/+$/, "");
-if (/\/sessions$/.test(openwaBase)) {
-  console.warn(
-    "OPENWA_BASE_URL has no session id segment — set OPENWA_SESSION_ID in .env, " +
-    "otherwise every OpenWA call will 404."
-  );
-}
+// Construct the full OpenWA session URL from the base domain + session ID
+const openwaBase = OPENWA_BASE_URL.replace(/\/+$/, "") + `/api/sessions/${OPENWA_SESSION_ID}`;
 
 const opencodeHeaders = () => {
   const headers = { "Content-Type": "application/json" };
@@ -133,16 +127,43 @@ async function deleteSession(sessionId) {
 }
 
 function buildPrompt({ chatId, sender, text }) {
+  const sessionId = OPENWA_SESSION_ID;
   return [
     `You are the WhatsApp assistant. An incoming WhatsApp message needs a reply.`,
-    `chatId: ${chatId}`,
-    `sender: ${sender}`,
-    `message: ${text}`,
     ``,
-    `Instructions:`,
-    `- If you need context (earlier messages in this chat), use your WhatsApp/OpenWA MCP tools to look up the chat history for chatId ${chatId} — do not assume any prior context.`,
-    `- Reply to the user by sending a WhatsApp text message to chatId ${chatId} using your MCP send-text tool. This is the only way the user sees your answer.`,
-    `- After sending it, respond to this prompt with exactly the text you sent, and nothing else, so it can be logged. Do not send it twice — the MCP tool call is the only actual delivery.`,
+    `## Context`,
+    `- WhatsApp session ID (sessionId): ${sessionId}  ← USE THIS for all WhatsApp MCP tool calls`,
+    `- Chat ID (chatId): ${chatId}`,
+    `- Sender: ${sender}`,
+    `- Message: ${text}`,
+    ``,
+    `## Available WhatsApp MCP tools`,
+    `All tools require sessionId = "${sessionId}" as shown above.`,
+    `- whatsapp_MessageHistory — Fetch recent messages in a chat. Params: sessionId="${sessionId}", chatId="${chatId}", limit=20`,
+    `- whatsapp_MessageSendText — Send a text reply. Params: sessionId="${sessionId}", chatId="${chatId}", text="your reply"`,
+    `- whatsapp_MessageList — List persisted messages from local DB. Params: sessionId="${sessionId}", chatId="${chatId}"`,
+    `- whatsapp_SessionFindOne — Get session info. Params: sessionId="${sessionId}"`,
+    `- whatsapp_SessionGetChats — List recent chats. Params: sessionId="${sessionId}"`,
+    ``,
+    `## Work order (follow exactly)`,
+    ``,
+    `Step 1 — Get context:`,
+    `Call whatsapp_MessageHistory with sessionId="${sessionId}" and chatId="${chatId}" to read recent messages. Use this to understand what the user is referring to.`,
+    ``,
+    `Step 2 — Compose your reply:`,
+    `Based on the message and chat history, write a helpful response.`,
+    ``,
+    `Step 3 — Send the reply:`,
+    `Call whatsapp_MessageSendText with sessionId="${sessionId}", chatId="${chatId}", and text="your reply message".`,
+    ``,
+    `Step 4 — Confirm:`,
+    `After sending, respond with EXACTLY the text you sent (the text parameter from Step 3). Nothing else — no labels, no prefixes. This text is logged for the system.`,
+    ``,
+    `## CRITICAL RULES`,
+    `- NEVER use "SessionFindAll" — you already have the session ID: ${sessionId}`,
+    `- NEVER use "MessageHistory" or "MessageList" without passing sessionId="${sessionId}"`,
+    `- NEVER skip Step 1 — always fetch chat history first for context`,
+    `- The chatId "${chatId}" is the WhatsApp JID — pass it as-is to all tools`,
   ].join("\n");
 }
 
@@ -253,9 +274,12 @@ app.post("/webhook/wa-message", async (req, res) => {
   log("webhook received", { chatId, sender, messageId, text: truncate(text) });
   await react(chatId, messageId, "👀");
 
-  let stillWorkingTimer = setTimeout(() => {
-    sendText(chatId, "Still working on it…");
-  }, Number(STILL_WORKING_AFTER_MS));
+  let stillWorkingTimer;
+  if (STILL_WORKING_AFTER_MS) {
+    stillWorkingTimer = setTimeout(() => {
+      sendText(chatId, "Still working on it…");
+    }, Number(STILL_WORKING_AFTER_MS));
+  }
 
   let sessionId;
   try {
