@@ -16,6 +16,7 @@ services:
       MAX_MESSAGES_PER_DAY: "100"
       PROMPT_TIMEOUT_MS: "300000"
       STILL_WORKING_AFTER_MS: "60000"
+      # KEEP_SESSIONS: "1"          # uncomment to keep sessions for debugging
     volumes:
       - ./data:/data
 

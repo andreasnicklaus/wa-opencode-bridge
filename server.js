@@ -11,6 +11,7 @@ const {
   OPENCODE_AGENT,           // optional named agent/mode to use for this bot
   OPENCODE_SERVER_USERNAME = "opencode",
   OPENCODE_SERVER_PASSWORD = "", // Basic auth for `opencode serve` when OPENCODE_SERVER_PASSWORD is set there
+  KEEP_SESSIONS,            // if set, don't delete sessions after each message (for debugging)
   ALLOWED_SENDERS = "",     // comma-separated phone numbers (no +, e.g. "4915112345678")
   MAX_MESSAGES_PER_DAY = 100,
   PROMPT_TIMEOUT_MS = 60000,
@@ -282,9 +283,11 @@ app.post("/webhook/wa-message", async (req, res) => {
     logExchange({ chatId, sender, incoming: text, error: String(err), sessionId });
   } finally {
     await react(chatId, messageId, ""); // clear 👀
-    if (sessionId) {
+    if (sessionId && !KEEP_SESSIONS) {
       await deleteSession(sessionId); // one-shot session, nothing to keep
       log("session deleted", { chatId, sessionId });
+    } else if (sessionId) {
+      log("session kept (KEEP_SESSIONS)", { chatId, sessionId });
     }
   }
 });
