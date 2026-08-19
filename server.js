@@ -5,39 +5,47 @@ import path from "path";
 // ---------- Config ----------
 const {
   PORT = 3210,
-  OPENWA_BASE_URL,          // e.g. https://openwa.example.com (without /api/sessions/<uuid>)
+  OPENWA_BASE_URL, // e.g. https://openwa.example.com (without /api/sessions/<uuid>)
   OPENWA_API_KEY,
-  OPENWA_SESSION_ID,        // WhatsApp session UUID needed for MCP tool calls
-  OPENCODE_BASE_URL,        // e.g. http://opencode:4096
-  OPENCODE_AGENT,           // optional named agent/mode to use for this bot
+  OPENWA_SESSION_ID, // WhatsApp session UUID needed for MCP tool calls
+  OPENCODE_BASE_URL, // e.g. http://opencode:4096
+  OPENCODE_AGENT, // optional named agent/mode to use for this bot
   OPENCODE_SERVER_USERNAME = "opencode",
   OPENCODE_SERVER_PASSWORD = "", // Basic auth for `opencode serve` when OPENCODE_SERVER_PASSWORD is set there
-  KEEP_SESSIONS,            // if set, don't delete sessions after each message (for debugging)
-  ALLOWED_SENDERS = "",     // comma-separated phone numbers (no +, e.g. "4915112345678")
+  KEEP_SESSIONS, // if set, don't delete sessions after each message (for debugging)
+  ALLOWED_SENDERS = "", // comma-separated phone numbers (no +, e.g. "4915112345678")
   MAX_MESSAGES_PER_DAY = 100,
   PROMPT_TIMEOUT_MS = 300000,
-  STILL_WORKING_AFTER_MS,  // if set, send "Still working on it…" after this many ms
+  STILL_WORKING_AFTER_MS, // if set, send "Still working on it…" after this many ms
   DATA_DIR = "/data",
 } = process.env;
 
 if (!OPENWA_BASE_URL || !OPENWA_SESSION_ID || !OPENCODE_BASE_URL) {
-  console.error("OPENWA_BASE_URL, OPENWA_SESSION_ID, and OPENCODE_BASE_URL are required");
+  console.error(
+    "OPENWA_BASE_URL, OPENWA_SESSION_ID, and OPENCODE_BASE_URL are required",
+  );
   process.exit(1);
 }
 
 // Construct the full OpenWA session URL from the base domain + session ID
-const openwaBase = OPENWA_BASE_URL.replace(/\/+$/, "") + `/api/sessions/${OPENWA_SESSION_ID}`;
+const openwaBase =
+  OPENWA_BASE_URL.replace(/\/+$/, "") + `/api/sessions/${OPENWA_SESSION_ID}`;
 
 const opencodeHeaders = () => {
   const headers = { "Content-Type": "application/json" };
   if (OPENCODE_SERVER_PASSWORD) {
     headers.Authorization =
-      "Basic " + Buffer.from(`${OPENCODE_SERVER_USERNAME}:${OPENCODE_SERVER_PASSWORD}`).toString("base64");
+      "Basic " +
+      Buffer.from(
+        `${OPENCODE_SERVER_USERNAME}:${OPENCODE_SERVER_PASSWORD}`,
+      ).toString("base64");
   }
   return headers;
 };
 
-const allowlist = ALLOWED_SENDERS.split(",").map(s => s.trim()).filter(Boolean);
+const allowlist = ALLOWED_SENDERS.split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
 const logPath = path.join(DATA_DIR, "log.jsonl");
 const usagePath = path.join(DATA_DIR, "usage.json");
 
@@ -54,14 +62,19 @@ function isDuplicateMessage(messageId) {
   if ((seenMessages.get(messageId) || 0) > now) return true;
   seenMessages.set(messageId, now + DEDUP_TTL_MS);
   if (seenMessages.size > 1000) {
-    for (const [id, exp] of seenMessages) if (exp <= now) seenMessages.delete(id);
+    for (const [id, exp] of seenMessages)
+      if (exp <= now) seenMessages.delete(id);
   }
   return false;
 }
 
 // ---------- Rate limiting (only stateful thing left) ----------
 function loadUsage() {
-  try { return JSON.parse(fs.readFileSync(usagePath, "utf8")); } catch { return {}; }
+  try {
+    return JSON.parse(fs.readFileSync(usagePath, "utf8"));
+  } catch {
+    return {};
+  }
 }
 function saveUsage(usage) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -78,7 +91,10 @@ function checkAndBumpRateLimit(sender) {
 }
 function logExchange(entry) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.appendFileSync(logPath, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n");
+  fs.appendFileSync(
+    logPath,
+    JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n",
+  );
 }
 
 // ---------- OpenWA helpers (used only for reactions + the safety-net fallback) ----------
@@ -92,11 +108,14 @@ async function waCall(pathSuffix, body) {
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    console.error(`OpenWA call ${pathSuffix} failed: ${res.status} ${await res.text()}`);
+    console.error(
+      `OpenWA call ${pathSuffix} failed: ${res.status} ${await res.text()}`,
+    );
   }
   return res;
 }
-const sendText = (chatId, text) => waCall("/messages/send-text", { chatId, text });
+const sendText = (chatId, text) =>
+  waCall("/messages/send-text", { chatId, text });
 const react = (chatId, messageId, emoji) =>
   waCall("/messages/react", { chatId, messageId, emoji });
 
@@ -117,7 +136,10 @@ async function createSession(chatId) {
 
 async function deleteSession(sessionId) {
   try {
-    const res = await fetch(`${OPENCODE_BASE_URL}/session/${sessionId}`, { method: "DELETE", headers: opencodeHeaders() });
+    const res = await fetch(`${OPENCODE_BASE_URL}/session/${sessionId}`, {
+      method: "DELETE",
+      headers: opencodeHeaders(),
+    });
     if (!res.ok) console.error(`opencode session delete failed: ${res.status}`);
   } catch (err) {
     // Non-fatal: worst case this session lingers with its "wa:" title
@@ -155,9 +177,10 @@ function buildPrompt({ chatId, sender, text }) {
     ``,
     `Step 3 — Send the reply:`,
     `Call whatsapp_MessageSendText with sessionId="${sessionId}", chatId="${chatId}", and text="your reply message".`,
+    `You may send multiple messages if the conversation requires it.`,
     ``,
     `Step 4 — Confirm:`,
-    `After sending, respond with EXACTLY the text you sent (the text parameter from Step 3). Nothing else — no labels, no prefixes. This text is logged for the system.`,
+    `After sending, respond with EXACTLY the text(s) you sent (the text parameter from Step 3). Nothing else — no labels, no prefixes. This text is logged for the system.`,
     ``,
     `## CRITICAL RULES`,
     `- NEVER use "SessionFindAll" — you already have the session ID: ${sessionId}`,
@@ -177,11 +200,22 @@ async function fetchSessionToolUses(sessionId) {
     method: "GET",
     headers: opencodeHeaders(),
   });
-  if (!res.ok) throw new Error(`opencode session messages failed: ${res.status} ${await res.text()}`);
+  if (!res.ok)
+    throw new Error(
+      `opencode session messages failed: ${res.status} ${await res.text()}`,
+    );
   const messages = await res.json();
-  const toolNameOf = p => p?.tool || p?.name || p?.state?.tool || p?.state?.input?.tool || p?.toolName || "";
-  return (messages || []).some(m =>
-    (m?.parts || []).some(p => p?.type === "tool" && /send.?text|whatsapp/i.test(toolNameOf(p)))
+  const toolNameOf = (p) =>
+    p?.tool ||
+    p?.name ||
+    p?.state?.tool ||
+    p?.state?.input?.tool ||
+    p?.toolName ||
+    "";
+  return (messages || []).some((m) =>
+    (m?.parts || []).some(
+      (p) => p?.type === "tool" && /send.?text|whatsapp/i.test(toolNameOf(p)),
+    ),
   );
 }
 
@@ -195,24 +229,33 @@ async function promptOpencode(sessionId, promptText) {
       ...(OPENCODE_AGENT ? { agent: OPENCODE_AGENT } : {}),
     }),
   });
-  if (!res.ok) throw new Error(`opencode prompt failed: ${res.status} ${await res.text()}`);
+  if (!res.ok)
+    throw new Error(
+      `opencode prompt failed: ${res.status} ${await res.text()}`,
+    );
   const result = await res.json();
   const parts = result?.parts || result?.message?.parts || [];
   const sentText = parts
-    .filter(p => p.type === "text")
-    .map(p => p.text)
+    .filter((p) => p.type === "text")
+    .map((p) => p.text)
     .join("\n")
     .trim();
 
   // Tool parts carry their name in different places depending on opencode
   // server version (top-level `tool`, `name`, or nested under `state`).
-  const toolNameOf = p => p?.tool || p?.name || p?.state?.tool || p?.state?.input?.tool || p?.toolName || "";
+  const toolNameOf = (p) =>
+    p?.tool ||
+    p?.name ||
+    p?.state?.tool ||
+    p?.state?.input?.tool ||
+    p?.toolName ||
+    "";
 
   // Did the agent actually call the WhatsApp send tool? Used as a sanity
   // check — if not, we fall back to sending the text ourselves so the
   // user isn't left hanging on a model that forgot to use its tools.
   let usedSendTool = parts.some(
-    p => p.type === "tool" && /send.?text|whatsapp/i.test(toolNameOf(p))
+    (p) => p.type === "tool" && /send.?text|whatsapp/i.test(toolNameOf(p)),
   );
   if (!usedSendTool) {
     try {
@@ -224,7 +267,9 @@ async function promptOpencode(sessionId, promptText) {
 
   log("received answer", {
     durationMs: Date.now() - start,
-    parts: parts.map(p => `${p.type}:${p.type === "tool" ? toolNameOf(p) : ""}`).join(", "),
+    parts: parts
+      .map((p) => `${p.type}:${p.type === "tool" ? toolNameOf(p) : ""}`)
+      .join(", "),
     usedSendTool,
   });
 
@@ -234,7 +279,9 @@ async function promptOpencode(sessionId, promptText) {
 function withTimeout(promise, ms) {
   return Promise.race([
     promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), ms)),
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("timeout")), ms),
+    ),
   ]);
 }
 
@@ -258,7 +305,11 @@ app.post("/webhook/wa-message", async (req, res) => {
   if (!text || !chatId || !messageId) return;
 
   if (isDuplicateMessage(messageId)) {
-    log("webhook duplicate, skipping", { chatId, messageId, text: truncate(text) });
+    log("webhook duplicate, skipping", {
+      chatId,
+      messageId,
+      text: truncate(text),
+    });
     return;
   }
 
@@ -267,7 +318,10 @@ app.post("/webhook/wa-message", async (req, res) => {
     return;
   }
   if (!checkAndBumpRateLimit(sender)) {
-    await sendText(chatId, "You've hit today's message limit for this bot — try again tomorrow.");
+    await sendText(
+      chatId,
+      "You've hit today's message limit for this bot — try again tomorrow.",
+    );
     return;
   }
 
@@ -288,7 +342,7 @@ app.post("/webhook/wa-message", async (req, res) => {
     const prompt = buildPrompt({ chatId, sender, text });
     const { sentText, usedSendTool } = await withTimeout(
       promptOpencode(sessionId, prompt),
-      Number(PROMPT_TIMEOUT_MS)
+      Number(PROMPT_TIMEOUT_MS),
     );
     clearTimeout(stillWorkingTimer);
 
@@ -299,12 +353,25 @@ app.post("/webhook/wa-message", async (req, res) => {
       await sendText(chatId, sentText);
     }
 
-    logExchange({ chatId, sender, incoming: text, reply: sentText, sessionId, usedSendTool });
+    logExchange({
+      chatId,
+      sender,
+      incoming: text,
+      reply: sentText,
+      sessionId,
+      usedSendTool,
+    });
   } catch (err) {
     clearTimeout(stillWorkingTimer);
     console.error("Error handling message:", err);
     await sendText(chatId, "Sorry, something went wrong processing that.");
-    logExchange({ chatId, sender, incoming: text, error: String(err), sessionId });
+    logExchange({
+      chatId,
+      sender,
+      incoming: text,
+      error: String(err),
+      sessionId,
+    });
   } finally {
     await react(chatId, messageId, ""); // clear 👀
     if (sessionId && !KEEP_SESSIONS) {
