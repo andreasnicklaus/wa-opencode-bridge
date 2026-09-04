@@ -161,7 +161,7 @@ function buildPrompt({ chatId, sender, text }) {
     ``,
     `## Available WhatsApp MCP tools`,
     `All tools require sessionId = "${sessionId}" as shown above.`,
-    `- whatsapp_MessageHistory — Fetch recent messages in a chat. Params: sessionId="${sessionId}", chatId="${chatId}", limit=20`,
+    `- whatsapp_MessageList — Fetch recent messages in a chat. Params: sessionId="${sessionId}", chatId="${chatId}", limit=20`,
     `- whatsapp_MessageSendText — Send a text reply. Params: sessionId="${sessionId}", chatId="${chatId}", text="your reply"`,
     `- whatsapp_MessageList — List persisted messages from local DB. Params: sessionId="${sessionId}", chatId="${chatId}"`,
     `- whatsapp_SessionFindOne — Get session info. Params: sessionId="${sessionId}"`,
