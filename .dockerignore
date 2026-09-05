@@ -4,4 +4,7 @@ data
 opencode.json
 test.http
 .git
+.gitignore
+Dockerfile
+docker-compose.yml
 *.log

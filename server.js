@@ -1,6 +1,7 @@
 import express from "express";
 import fs from "fs";
 import path from "path";
+import { buildPrompt } from "./prompt.js";
 
 // ---------- Config ----------
 const {
@@ -148,47 +149,6 @@ async function deleteSession(sessionId) {
   }
 }
 
-function buildPrompt({ chatId, sender, text }) {
-  const sessionId = OPENWA_SESSION_ID;
-  return [
-    `You are the WhatsApp assistant. An incoming WhatsApp message needs a reply.`,
-    ``,
-    `## Context`,
-    `- WhatsApp session ID (sessionId): ${sessionId}  ← USE THIS for all WhatsApp MCP tool calls`,
-    `- Chat ID (chatId): ${chatId}`,
-    `- Sender: ${sender}`,
-    `- Message: ${text}`,
-    ``,
-    `## Available WhatsApp MCP tools`,
-    `All tools require sessionId = "${sessionId}" as shown above.`,
-    `- whatsapp_MessageSendText — Send a text reply. Params: sessionId="${sessionId}", chatId="${chatId}", text="your reply"`,
-    `- whatsapp_MessageList — List persisted messages from local DB. Params: sessionId="${sessionId}", chatId="${chatId}"`,
-    `- whatsapp_SessionFindOne — Get session info. Params: sessionId="${sessionId}"`,
-    `- whatsapp_SessionGetChats — List recent chats. Params: sessionId="${sessionId}"`,
-    ``,
-    `## Work order (follow exactly)`,
-    ``,
-    `Step 1 — Get context:`,
-    `Call whatsapp_MessageList with sessionId="${sessionId}" and chatId="${chatId}" to read recent messages. Use this to understand what the user is referring to.`,
-    ``,
-    `Step 2 — Compose your reply:`,
-    `Based on the message and chat history, write a helpful response.`,
-    ``,
-    `Step 3 — Send the reply:`,
-    `Call whatsapp_MessageSendText with sessionId="${sessionId}", chatId="${chatId}", and text="your reply message".`,
-    `You may send multiple messages if the conversation requires it.`,
-    ``,
-    `Step 4 — Confirm:`,
-    `After sending, respond with EXACTLY the text(s) you sent (the text parameter from Step 3). Nothing else — no labels, no prefixes. This text is logged for the system.`,
-    ``,
-    `## CRITICAL RULES`,
-    `- NEVER use "SessionFindAll" — you already have the session ID: ${sessionId}`,
-    `- NEVER use "MessageHistory" or "MessageList" without passing sessionId="${sessionId}"`,
-    `- NEVER skip Step 1 — always fetch chat history first for context`,
-    `- The chatId "${chatId}" is the WhatsApp JID — pass it as-is to all tools`,
-  ].join("\n");
-}
-
 // The POST /message response only carries the final assistant message's
 // parts (step-start/text/step-finish) — tool calls live in separate
 // assistant messages that the streaming endpoint never returns. List the
@@ -301,6 +261,12 @@ app.post("/webhook/wa-message", async (req, res) => {
   const messageId = msg.id;
   const text = msg.body || msg.text;
 
+  // A reply-to carries the quoted message at top level in the webhook's
+  // `data` object (and under metadata.quotedMessage for hand-crafted bodies).
+  const quoted = msg.quotedMessage || msg.metadata?.quotedMessage || null;
+  const quotedMessageId = quoted?.id || null;
+  const quotedBody = quoted?.body || null;
+
   if (!text || !chatId || !messageId) return;
 
   if (isDuplicateMessage(messageId)) {
@@ -324,7 +290,13 @@ app.post("/webhook/wa-message", async (req, res) => {
     return;
   }
 
-  log("webhook received", { chatId, sender, messageId, text: truncate(text) });
+    log("webhook received", {
+      chatId,
+      sender,
+      messageId,
+      quotedBody: quotedBody ? truncate(quotedBody) : null,
+      text: truncate(text),
+    });
   await react(chatId, messageId, "👀");
 
   let stillWorkingTimer;
@@ -338,7 +310,7 @@ app.post("/webhook/wa-message", async (req, res) => {
   try {
     sessionId = await createSession(chatId);
     log("session created", { chatId, sessionId });
-    const prompt = buildPrompt({ chatId, sender, text });
+    const prompt = buildPrompt({ chatId, sender, text, quotedMessageId, quotedBody });
     const { sentText, usedSendTool } = await withTimeout(
       promptOpencode(sessionId, prompt),
       Number(PROMPT_TIMEOUT_MS),
@@ -356,6 +328,8 @@ app.post("/webhook/wa-message", async (req, res) => {
       chatId,
       sender,
       incoming: text,
+      quotedMessageId,
+      quotedBody,
       reply: sentText,
       sessionId,
       usedSendTool,
