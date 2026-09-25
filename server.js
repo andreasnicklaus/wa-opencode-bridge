@@ -2,6 +2,14 @@ import express from "express";
 import fs from "fs";
 import path from "path";
 import { buildPrompt } from "./prompt.js";
+import {
+  hasSendTool,
+  isControlOnlyResponse,
+  latestAssistantText,
+  parsePromptBody,
+  responseParts,
+  responseText,
+} from "./opencode-response.js";
 
 // ---------- Config ----------
 const {
@@ -149,12 +157,7 @@ async function deleteSession(sessionId) {
   }
 }
 
-// The POST /message response only carries the final assistant message's
-// parts (step-start/text/step-finish) — tool calls live in separate
-// assistant messages that the streaming endpoint never returns. List the
-// whole session after the prompt completes and scan every part for a
-// WhatsApp send-tool invocation; that is the only reliable place to see it.
-async function fetchSessionToolUses(sessionId) {
+async function fetchSessionState(sessionId) {
   const res = await fetch(`${OPENCODE_BASE_URL}/session/${sessionId}/message`, {
     method: "GET",
     headers: opencodeHeaders(),
@@ -163,19 +166,26 @@ async function fetchSessionToolUses(sessionId) {
     throw new Error(
       `opencode session messages failed: ${res.status} ${await res.text()}`,
     );
-  const messages = await res.json();
-  const toolNameOf = (p) =>
-    p?.tool ||
-    p?.name ||
-    p?.state?.tool ||
-    p?.state?.input?.tool ||
-    p?.toolName ||
-    "";
-  return (messages || []).some((m) =>
-    (m?.parts || []).some(
-      (p) => p?.type === "tool" && /send.?text|whatsapp/i.test(toolNameOf(p)),
-    ),
-  );
+  const body = await res.text();
+  if (!body.trim()) return { messages: [], usedSendTool: false, sentText: "" };
+  let payload;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    throw new Error("opencode session messages returned invalid JSON");
+  }
+  const messages = Array.isArray(payload)
+    ? payload
+    : Array.isArray(payload?.messages)
+      ? payload.messages
+      : Array.isArray(payload?.data)
+        ? payload.data
+        : [];
+  return {
+    messages,
+    usedSendTool: hasSendTool(messages),
+    sentText: latestAssistantText(messages),
+  };
 }
 
 async function promptOpencode(sessionId, promptText) {
@@ -192,47 +202,43 @@ async function promptOpencode(sessionId, promptText) {
     throw new Error(
       `opencode prompt failed: ${res.status} ${await res.text()}`,
     );
-  const result = await res.json();
-  const parts = result?.parts || result?.message?.parts || [];
-  const sentText = parts
-    .filter((p) => p.type === "text")
-    .map((p) => p.text)
-    .join("\n")
-    .trim();
 
-  // Tool parts carry their name in different places depending on opencode
-  // server version (top-level `tool`, `name`, or nested under `state`).
-  const toolNameOf = (p) =>
-    p?.tool ||
-    p?.name ||
-    p?.state?.tool ||
-    p?.state?.input?.tool ||
-    p?.toolName ||
-    "";
+  const parsed = parsePromptBody(await res.text());
+  let parts = responseParts(parsed.payload);
+  let sentText = responseText(parsed.payload);
+  let usedSendTool = hasSendTool(parsed.payload);
+  let sessionScanned = false;
+  let recoveredFromSession = false;
 
-  // Did the agent actually call the WhatsApp send tool? Used as a sanity
-  // check — if not, we fall back to sending the text ourselves so the
-  // user isn't left hanging on a model that forgot to use its tools.
-  let usedSendTool = parts.some(
-    (p) => p.type === "tool" && /send.?text|whatsapp/i.test(toolNameOf(p)),
-  );
   if (!usedSendTool) {
     try {
-      usedSendTool = await fetchSessionToolUses(sessionId);
+      const sessionState = await fetchSessionState(sessionId);
+      sessionScanned = true;
+      usedSendTool = sessionState.usedSendTool;
+      if (!sentText && sessionState.sentText) {
+        sentText = sessionState.sentText;
+        recoveredFromSession = true;
+      }
     } catch (err) {
-      console.error("session tool scan failed:", err);
+      console.error("session response recovery failed:", err);
     }
   }
 
+  const noUserVisibleResponse = !sentText && !usedSendTool;
   log("received answer", {
     durationMs: Date.now() - start,
+    responseKind: parsed.kind,
+    controlOnly: isControlOnlyResponse(parsed.payload),
+    sessionScanned,
+    recoveredFromSession,
     parts: parts
-      .map((p) => `${p.type}:${p.type === "tool" ? toolNameOf(p) : ""}`)
+      .map((part) => `${part?.type || "unknown"}`)
       .join(", "),
     usedSendTool,
+    noUserVisibleResponse,
   });
 
-  return { sentText: sentText || "(agent returned no text)", usedSendTool };
+  return { sentText, usedSendTool, responseKind: parsed.kind };
 }
 
 function withTimeout(promise, ms) {
@@ -311,17 +317,20 @@ app.post("/webhook/wa-message", async (req, res) => {
     sessionId = await createSession(chatId);
     log("session created", { chatId, sessionId });
     const prompt = buildPrompt({ chatId, sender, text, quotedMessageId, quotedBody });
-    const { sentText, usedSendTool } = await withTimeout(
+    const { sentText, usedSendTool, responseKind } = await withTimeout(
       promptOpencode(sessionId, prompt),
       Number(PROMPT_TIMEOUT_MS),
     );
     clearTimeout(stillWorkingTimer);
 
-    if (!usedSendTool) {
-      // Safety net: agent produced text but never actually messaged the
-      // user via MCP — send it ourselves rather than silently dropping it.
+    if (!usedSendTool && sentText) {
       log(`Agent for ${chatId} didn't use its send tool; sending fallback.`);
       await sendText(chatId, sentText);
+    } else if (!usedSendTool) {
+      log("Agent produced no user-visible response; suppressing fallback.", {
+        chatId,
+        responseKind,
+      });
     }
 
     logExchange({
@@ -330,9 +339,11 @@ app.post("/webhook/wa-message", async (req, res) => {
       incoming: text,
       quotedMessageId,
       quotedBody,
-      reply: sentText,
+      reply: sentText || null,
       sessionId,
       usedSendTool,
+      responseKind,
+      noUserVisibleResponse: !sentText && !usedSendTool,
     });
   } catch (err) {
     clearTimeout(stillWorkingTimer);
