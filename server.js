@@ -3,6 +3,7 @@ import fs from "fs";
 import path from "path";
 import { Agent } from "undici";
 import { buildPrompt } from "./prompt.js";
+import { isAllowed, isLidJid, phoneFromJid } from "./sender-allowlist.js";
 import {
   hasSendTool,
   isControlOnlyResponse,
@@ -133,6 +134,41 @@ const sendText = (chatId, text) =>
   waCall("/messages/send-text", { chatId, text });
 const react = (chatId, messageId, emoji) =>
   waCall("/messages/react", { chatId, messageId, emoji });
+
+const PHONE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const phoneCache = new Map();
+
+async function resolveSenderPhone(contactJid) {
+  const cached = phoneCache.get(contactJid);
+  if (cached && cached.expires > Date.now()) return cached.phone;
+  try {
+    const res = await fetch(
+      `${openwaBase}/contacts/${encodeURIComponent(contactJid)}/phone`,
+      {
+        method: "GET",
+        headers: { Authorization: `Bearer ${OPENWA_API_KEY}` },
+      },
+    );
+    if (!res.ok) {
+      console.error(
+        `OpenWA resolve phone for ${contactJid} failed: ${res.status}`,
+      );
+      return null;
+    }
+    const payload = await res.json();
+    const phone = payload?.phone || null;
+    if (phone) {
+      phoneCache.set(contactJid, {
+        phone,
+        expires: Date.now() + PHONE_CACHE_TTL_MS,
+      });
+    }
+    return phone;
+  } catch (err) {
+    console.error(`OpenWA resolve phone for ${contactJid} error:`, err);
+    return null;
+  }
+}
 
 // ---------- opencode helpers ----------
 // One fresh, throwaway session per incoming message. No chatId->session
@@ -270,7 +306,8 @@ app.post("/webhook/wa-message", async (req, res) => {
   const msg = req.body?.data || req.body;
   if (!msg || msg.fromMe) return; // never react to our own outgoing messages
 
-  const sender = (msg.from || msg.sender?.id || "").replace(/@.*/, "");
+  const senderJid = msg.from || msg.sender?.id || "";
+  const sender = senderJid.replace(/@.*/, "");
   const chatId = msg.chatId || msg.from;
   const messageId = msg.id;
   const text = msg.body || msg.text;
@@ -292,9 +329,20 @@ app.post("/webhook/wa-message", async (req, res) => {
     return;
   }
 
-  if (allowlist.length && !allowlist.includes(sender)) {
-    log(`Ignoring message from non-allowlisted sender ${sender}`);
-    return;
+  if (allowlist.length) {
+    const phone = isLidJid(senderJid)
+      ? await resolveSenderPhone(senderJid)
+      : phoneFromJid(senderJid);
+    if (!isAllowed(phone, allowlist)) {
+      log(
+        `Ignoring message from non-allowlisted sender ${sender} (phone ${phone || "unresolved"})`,
+      );
+      await sendText(
+        chatId,
+        "Dieser Dienst steht dir leider nicht zur Verfügung. Bitte wende dich an den Betreiber des Dienstes.",
+      );
+      return;
+    }
   }
   if (!checkAndBumpRateLimit(sender)) {
     await sendText(
