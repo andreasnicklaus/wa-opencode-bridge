@@ -78,7 +78,7 @@ Everything is stateless except the per-day usage counters persisted in the `DATA
 | `OPENCODE_SERVER_PASSWORD` | _(empty)_             | Basic-auth password; only sent when set.                                                                                               |
 | `ALLOWED_SENDERS`          | _(empty = allow all)_ | Comma-separated phone numbers (no `+`), e.g. `4915112345678,491701234567`.                                                             |
 | `MAX_MESSAGES_PER_DAY`     | `100`                 | Per-sender daily message cap.                                                                                                          |
-| `PROMPT_TIMEOUT_MS`        | `300000`              | Max time to wait for the agent before erroring (default 5 min).                                                                        |
+| `PROMPT_TIMEOUT_MS`        | `300000`              | Max time to wait for the agent before erroring (default 5 min). Also sets the HTTP client (undici) headers/body timeout for OpenCode requests, so long jobs aren't cut off early. Any upstream proxy (e.g. Nginx Proxy Manager `proxy_read_timeout`) must be set to at least this value. |
 | `STILL_WORKING_AFTER_MS`   | _(none)_              | If set, send a "Still working on it…" interim message after this many ms.                                                              |
 | `DATA_DIR`                 | `/data`               | Directory for `log.jsonl` and `usage.json`.                                                                                            |
 | `KEEP_SESSIONS`            | _(empty)_             | If set to any non-empty value, sessions are not deleted after each message (for debugging).                                            |

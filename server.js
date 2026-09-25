@@ -1,6 +1,7 @@
 import express from "express";
 import fs from "fs";
 import path from "path";
+import { Agent } from "undici";
 import { buildPrompt } from "./prompt.js";
 import {
   hasSendTool,
@@ -51,6 +52,11 @@ const opencodeHeaders = () => {
   }
   return headers;
 };
+
+const opencodeDispatcher = new Agent({
+  headersTimeout: Number(PROMPT_TIMEOUT_MS),
+  bodyTimeout: Number(PROMPT_TIMEOUT_MS),
+});
 
 const allowlist = ALLOWED_SENDERS.split(",")
   .map((s) => s.trim())
@@ -161,6 +167,7 @@ async function fetchSessionState(sessionId) {
   const res = await fetch(`${OPENCODE_BASE_URL}/session/${sessionId}/message`, {
     method: "GET",
     headers: opencodeHeaders(),
+    dispatcher: opencodeDispatcher,
   });
   if (!res.ok)
     throw new Error(
@@ -193,6 +200,7 @@ async function promptOpencode(sessionId, promptText) {
   const res = await fetch(`${OPENCODE_BASE_URL}/session/${sessionId}/message`, {
     method: "POST",
     headers: opencodeHeaders(),
+    dispatcher: opencodeDispatcher,
     body: JSON.stringify({
       parts: [{ type: "text", text: promptText }],
       ...(OPENCODE_AGENT ? { agent: OPENCODE_AGENT } : {}),

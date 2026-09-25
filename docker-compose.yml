@@ -15,7 +15,7 @@ services:
       # OPENCODE_AGENT: "whatsapp-assistant"     # optional: a dedicated agent/mode
       # ALLOWED_SENDERS: "4915112345678,491701234567"
       # MAX_MESSAGES_PER_DAY: "100"
-      # PROMPT_TIMEOUT_MS: "300000"
+      PROMPT_TIMEOUT_MS: "660000"  # 11 min; keep the upstream proxy timeout >= this
       # STILL_WORKING_AFTER_MS: "60000"  # uncomment to send "Still working on it…" after 60s
       # KEEP_SESSIONS: "1"          # uncomment to keep sessions for debugging
     volumes:
