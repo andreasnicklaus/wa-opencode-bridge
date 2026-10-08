@@ -64,11 +64,28 @@ export function responseText(value) {
   return textFromParts(responseParts(value));
 }
 
+// Matches an actual MessageSendText call, e.g. code passed to an
+// `execute` tool: `tools.whatsapp.MessageSendText({...})`. Deliberately
+// precise so search queries like `search({query: "whatsapp send text"})`
+// don't count as sending.
+const SEND_CALL_PATTERN = /whatsapp\.MessageSendText|MessageSendText\s*\(/;
+
+function toolPartSends(part) {
+  if (part?.type !== "tool") return false;
+  if (/send.?text|whatsapp/i.test(toolNameOf(part))) return true;
+  const input = part?.state?.input;
+  if (input == null) return false;
+  try {
+    return SEND_CALL_PATTERN.test(
+      typeof input === "string" ? input : JSON.stringify(input),
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function hasSendTool(value) {
-  return allParts(value).some(
-    (part) =>
-      part?.type === "tool" && /send.?text|whatsapp/i.test(toolNameOf(part)),
-  );
+  return allParts(value).some((part) => toolPartSends(part));
 }
 
 export function latestAssistantText(messages) {

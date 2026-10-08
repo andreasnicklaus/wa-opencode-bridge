@@ -52,6 +52,69 @@ test("recognizes a send tool in a session message", () => {
   assert.equal(hasSendTool(messages), true);
 });
 
+test("v2: recognizes a send wrapped inside an execute tool", () => {
+  const messages = [
+    {
+      type: "assistant",
+      content: [
+        {
+          type: "tool",
+          id: "toolu_1",
+          name: "execute",
+          state: {
+            status: "completed",
+            input: {
+              code: 'return await tools.whatsapp.MessageSendText({sessionId: "abc", chatId: "1@c.us", text: "hi"});',
+            },
+          },
+        },
+      ],
+    },
+  ];
+
+  assert.equal(hasSendTool(messages), true);
+});
+
+test("v2: does not treat search queries mentioning whatsapp as sends", () => {
+  const messages = [
+    {
+      type: "assistant",
+      content: [
+        {
+          type: "tool",
+          id: "toolu_1",
+          name: "execute",
+          state: {
+            status: "completed",
+            input: {
+              code: 'search({query: "whatsapp send text", namespace: "whatsapp"});',
+            },
+          },
+        },
+        {
+          type: "tool",
+          id: "toolu_2",
+          name: "shell",
+          state: { status: "completed", input: { command: "date -u" } },
+        },
+        {
+          type: "tool",
+          id: "toolu_3",
+          name: "execute",
+          state: {
+            status: "completed",
+            input: {
+              code: 'return await tools.whatsapp.MessageList({sessionId: "abc"});',
+            },
+          },
+        },
+      ],
+    },
+  ];
+
+  assert.equal(hasSendTool(messages), false);
+});
+
 test("recovers the latest assistant text but ignores user text", () => {
   const messages = [
     {
