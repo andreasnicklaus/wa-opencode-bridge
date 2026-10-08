@@ -10,7 +10,7 @@ A tiny HTTP bridge that connects WhatsApp to [opencode](https://opencode.ai) run
 
 1. **Set up the two upstreams**
    - **OpenWA** — a WhatsApp gateway with the REST API and MCP enabled. You need the base URL (e.g. `https://openwa.example.com`) and an API key.
-   - **opencode server** — run `opencode serve` (optionally with `OPENCODE_SERVER_PASSWORD` set for Basic auth) so `http://host:4096` responds. The bridge talks to the `POST /session` and `/session/<id>/message` endpoints.
+   - **opencode server** — run `opencode serve` (optionally with `OPENCODE_SERVER_PASSWORD` set for Basic auth) so `http://host:4096` responds. The bridge uses the v2 API: `POST /api/session`, `POST /api/session/<id>/prompt` + `POST /api/experimental/session/<id>/wait`, `GET /api/session/<id>/message`, and `DELETE /api/session/<id>`.
 
 2. **Write a production `docker-compose.yml`**
 
@@ -57,7 +57,7 @@ Send a WhatsApp message to the session's number and the agent should reply.
 1. **Webhook** — OpenWA POSTs every incoming message to `/webhook/wa-message`. The bridge acks instantly, then works asynchronously.
 2. **Dedup** — OpenWA delivers at-least-once, so messages are deduplicated by id within a 10-minute window.
 3. **Guardrails** — a per-sender allowlist and a per-sender daily message cap are enforced before anything runs.
-4. **One-shot session** — a fresh opencode session is created for the message (titled `wa:<chatId>:<timestamp>`) and the message text is injected into a prompt. No chatId→session mapping: if the agent needs prior context it pulls chat history itself via its WhatsApp MCP tools.
+4. **One-shot session** — a fresh opencode session is created for the message (titled `wa:<chatId>:<timestamp>`) and the message text is submitted as a prompt. Prompts are asynchronous in the v2 API, so the bridge polls the wait endpoint until the agent loop is idle and only then reads the session's messages. No chatId→session mapping: if the agent needs prior context it pulls chat history itself via its WhatsApp MCP tools.
 5. **Processing** — the bridge reacts with 👀, optionally sends a "Still working on it…" fallback if the agent runs long (when `STILL_WORKING_AFTER_MS` is set), and enforces a prompt timeout.
 6. **Delivery** — the agent is instructed to reply by sending a WhatsApp text through its MCP send-text tool; that MCP call is the only real delivery. The bridge scans the session for a send-tool invocation as a sanity check.
 7. **Safety net** — if the agent produced text but never invoked the send tool, the bridge sends the text itself so the user isn't left hanging.

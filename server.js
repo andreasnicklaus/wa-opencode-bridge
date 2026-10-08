@@ -4,14 +4,7 @@ import path from "path";
 import { Agent } from "undici";
 import { buildPrompt } from "./prompt.js";
 import { isAllowed, isLidJid, phoneFromJid } from "./sender-allowlist.js";
-import {
-  hasSendTool,
-  isControlOnlyResponse,
-  latestAssistantText,
-  parsePromptBody,
-  responseParts,
-  responseText,
-} from "./opencode-response.js";
+import { hasSendTool, latestAssistantText } from "./opencode-response.js";
 
 // ---------- Config ----------
 const {
@@ -175,23 +168,29 @@ async function resolveSenderPhone(contactJid) {
 // mapping: if the agent needs prior context, it uses its OpenWA MCP tools
 // to pull chat history for chatId itself.
 async function createSession(chatId) {
-  const res = await fetch(`${OPENCODE_BASE_URL}/session`, {
+  const res = await fetch(`${OPENCODE_BASE_URL}/api/session`, {
     method: "POST",
     headers: opencodeHeaders(),
-    body: JSON.stringify({ title: `wa:${chatId}:${Date.now()}` }),
+    body: JSON.stringify({
+      title: `wa:${chatId}:${Date.now()}`,
+      ...(OPENCODE_AGENT ? { agent: OPENCODE_AGENT } : {}),
+    }),
   });
   if (!res.ok) throw new Error(`opencode session create failed: ${res.status}`);
   const session = await res.json();
-  return session.id;
+  return session?.data?.id || session.id;
 }
 
 async function deleteSession(sessionId) {
   try {
-    const res = await fetch(`${OPENCODE_BASE_URL}/session/${sessionId}`, {
+    const res = await fetch(`${OPENCODE_BASE_URL}/api/session/${sessionId}`, {
       method: "DELETE",
       headers: opencodeHeaders(),
     });
-    if (!res.ok) console.error(`opencode session delete failed: ${res.status}`);
+    // 404 means it is already gone, which is all we wanted anyway.
+    if (!res.ok && res.status !== 404) {
+      console.error(`opencode session delete failed: ${res.status}`);
+    }
   } catch (err) {
     // Non-fatal: worst case this session lingers with its "wa:" title
     // prefix, so it's still identifiable for a manual/batch cleanup later.
@@ -199,31 +198,44 @@ async function deleteSession(sessionId) {
   }
 }
 
+// v2 caps `limit` at 200; longer sessions are walked with cursor.next.
+const MESSAGE_PAGE_LIMIT = 200;
+const MAX_MESSAGE_PAGES = 10;
+
 async function fetchSessionState(sessionId) {
-  const res = await fetch(`${OPENCODE_BASE_URL}/session/${sessionId}/message`, {
-    method: "GET",
-    headers: opencodeHeaders(),
-    dispatcher: opencodeDispatcher,
-  });
-  if (!res.ok)
-    throw new Error(
-      `opencode session messages failed: ${res.status} ${await res.text()}`,
-    );
-  const body = await res.text();
-  if (!body.trim()) return { messages: [], usedSendTool: false, sentText: "" };
-  let payload;
-  try {
-    payload = JSON.parse(body);
-  } catch {
-    throw new Error("opencode session messages returned invalid JSON");
+  const messages = [];
+  let url = `${OPENCODE_BASE_URL}/api/session/${sessionId}/message?order=asc&limit=${MESSAGE_PAGE_LIMIT}`;
+  for (let page = 0; page < MAX_MESSAGE_PAGES; page += 1) {
+    const res = await fetch(url, {
+      method: "GET",
+      headers: opencodeHeaders(),
+      dispatcher: opencodeDispatcher,
+    });
+    if (!res.ok)
+      throw new Error(
+        `opencode session messages failed: ${res.status} ${await res.text()}`,
+      );
+    const body = await res.text();
+    if (!body.trim()) break;
+    let payload;
+    try {
+      payload = JSON.parse(body);
+    } catch {
+      throw new Error("opencode session messages returned invalid JSON");
+    }
+    const batch = Array.isArray(payload)
+      ? payload
+      : Array.isArray(payload?.messages)
+        ? payload.messages
+        : Array.isArray(payload?.data)
+          ? payload.data
+          : [];
+    messages.push(...batch);
+    // `order` and `cursor` must not be combined, so later pages drop it.
+    const next = payload?.cursor?.next;
+    if (!next || batch.length === 0) break;
+    url = `${OPENCODE_BASE_URL}/api/session/${sessionId}/message?limit=${MESSAGE_PAGE_LIMIT}&cursor=${encodeURIComponent(next)}`;
   }
-  const messages = Array.isArray(payload)
-    ? payload
-    : Array.isArray(payload?.messages)
-      ? payload.messages
-      : Array.isArray(payload?.data)
-        ? payload.data
-        : [];
   return {
     messages,
     usedSendTool: hasSendTool(messages),
@@ -231,58 +243,119 @@ async function fetchSessionState(sessionId) {
   };
 }
 
+// opencode v2 admits a prompt asynchronously: the POST returns as soon as the
+// input is durably queued ({data: Session.Inbox.User}) and the agent loop runs
+// in the background. Completion is observed with the wait endpoint (204 = loop
+// idle, 503 = still busy), then the answer is read from the message list.
+const WAIT_POLL_INTERVAL_MS = 1000;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForAgentIdle(sessionId) {
+  const res = await fetch(
+    `${OPENCODE_BASE_URL}/api/experimental/session/${sessionId}/wait`,
+    {
+      method: "POST",
+      headers: opencodeHeaders(),
+      dispatcher: opencodeDispatcher,
+    },
+  );
+  if (res.status === 204) return true; // agent loop is idle
+  if (res.status === 503) return false; // still busy
+  throw new Error(`opencode wait failed: ${res.status} ${await res.text()}`);
+}
+
+// Poll until the loop reports idle *and* a reply newer than our prompt exists
+// (guards against `wait` answering before the loop has actually started).
+async function waitForReply(sessionId, promptAt) {
+  const startedAt = Date.now();
+  let attempts = 0;
+  for (;;) {
+    attempts += 1;
+    const idle = await waitForAgentIdle(sessionId);
+    const state = await fetchSessionState(sessionId);
+    const replies = state.messages.filter(
+      (message) =>
+        (message?.time?.created || 0) >= promptAt &&
+        (message?.type === "assistant" || message?.type === "idle"),
+    );
+    const last = state.messages[state.messages.length - 1];
+    if ((idle && replies.length) || last?.type === "idle") {
+      return {
+        durationMs: Date.now() - startedAt,
+        attempts,
+        messages: state.messages,
+      };
+    }
+    await sleep(WAIT_POLL_INTERVAL_MS);
+  }
+}
+
 async function promptOpencode(sessionId, promptText) {
   const start = Date.now();
-  const res = await fetch(`${OPENCODE_BASE_URL}/session/${sessionId}/message`, {
+  const res = await fetch(`${OPENCODE_BASE_URL}/api/session/${sessionId}/prompt`, {
     method: "POST",
     headers: opencodeHeaders(),
     dispatcher: opencodeDispatcher,
-    body: JSON.stringify({
-      parts: [{ type: "text", text: promptText }],
-      ...(OPENCODE_AGENT ? { agent: OPENCODE_AGENT } : {}),
-    }),
+    body: JSON.stringify({ text: promptText }),
   });
   if (!res.ok)
     throw new Error(
       `opencode prompt failed: ${res.status} ${await res.text()}`,
     );
 
-  const parsed = parsePromptBody(await res.text());
-  let parts = responseParts(parsed.payload);
-  let sentText = responseText(parsed.payload);
-  let usedSendTool = hasSendTool(parsed.payload);
-  let sessionScanned = false;
-  let recoveredFromSession = false;
+  const inbox = await res.json().catch(() => null);
+  const promptMessageId = inbox?.data?.id || null;
+  const promptAt = inbox?.data?.time?.created || Date.now();
 
-  if (!usedSendTool) {
-    try {
-      const sessionState = await fetchSessionState(sessionId);
-      sessionScanned = true;
-      usedSendTool = sessionState.usedSendTool;
-      if (!sentText && sessionState.sentText) {
-        sentText = sessionState.sentText;
-        recoveredFromSession = true;
-      }
-    } catch (err) {
-      console.error("session response recovery failed:", err);
+  const { durationMs: waitMs, attempts, messages } = await waitForReply(
+    sessionId,
+    promptAt,
+  );
+
+  // One-shot session, but slice after our prompt anyway so a session kept for
+  // debugging (KEEP_SESSIONS) never leaks an older turn's text into this reply.
+  let relevant = messages;
+  if (promptMessageId) {
+    const index = messages.findIndex((m) => m.id === promptMessageId);
+    if (index >= 0) relevant = messages.slice(index);
+  }
+  const parts = relevant
+    .filter((m) => m?.type === "assistant")
+    .flatMap((m) => (Array.isArray(m.content) ? m.content : []));
+  const sentText = latestAssistantText(relevant);
+  const usedSendTool = hasSendTool(relevant);
+
+  // A failed run (e.g. upstream model outage) yields no text at all; surface
+  // it as an error instead of silently telling the user nothing.
+  if (!sentText && !usedSendTool) {
+    const idleMessage = [...relevant]
+      .reverse()
+      .find((message) => message?.type === "idle");
+    if (idleMessage?.outcome && idleMessage.outcome !== "succeeded") {
+      const failed = [...relevant]
+        .reverse()
+        .find((message) => message?.type === "assistant" && message.finish === "error");
+      throw new Error(
+        `opencode run ${idleMessage.outcome}${failed?.error?.message ? `: ${failed.error.message}` : ""}`,
+      );
     }
   }
 
   const noUserVisibleResponse = !sentText && !usedSendTool;
   log("received answer", {
     durationMs: Date.now() - start,
-    responseKind: parsed.kind,
-    controlOnly: isControlOnlyResponse(parsed.payload),
-    sessionScanned,
-    recoveredFromSession,
-    parts: parts
-      .map((part) => `${part?.type || "unknown"}`)
-      .join(", "),
+    waitMs,
+    waitAttempts: attempts,
+    responseKind: "polled",
+    parts: parts.map((part) => `${part?.type || "unknown"}`).join(", "),
     usedSendTool,
     noUserVisibleResponse,
   });
 
-  return { sentText, usedSendTool, responseKind: parsed.kind };
+  return { sentText, usedSendTool, responseKind: "polled" };
 }
 
 function withTimeout(promise, ms) {

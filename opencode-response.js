@@ -5,6 +5,8 @@ function asArray(value) {
 function messageParts(value) {
   if (!value || typeof value !== "object") return [];
   if (Array.isArray(value.parts)) return value.parts;
+  // opencode v2 flat assistant message: {type:"assistant", content:[...]}
+  if (Array.isArray(value.content)) return value.content;
   if (value.message && value.message !== value) return messageParts(value.message);
   if (value.data && value.data !== value) return messageParts(value.data);
   if (value.type === "text" || value.type === "reasoning" || value.type === "tool") {
@@ -19,7 +21,13 @@ function allParts(value) {
 }
 
 function messageRole(value) {
-  return value?.info?.role || value?.message?.role || value?.role || value?.info?.type || "";
+  if (value?.info?.role || value?.message?.role || value?.role) {
+    return value.info?.role || value.message?.role || value.role;
+  }
+  // opencode v2 flat messages carry the role in `type`
+  // ({type:"user"|"assistant"|"system"|...}).
+  if (typeof value?.type === "string") return value.type;
+  return value?.info?.type || "";
 }
 
 function toolNameOf(part) {
