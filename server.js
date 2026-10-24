@@ -5,6 +5,7 @@ import { Agent } from "undici";
 import { buildPrompt } from "./prompt.js";
 import { isAllowed, isLidJid, phoneFromJid } from "./sender-allowlist.js";
 import { hasSendTool, latestAssistantText } from "./opencode-response.js";
+import { parseOpenCodeModel } from "./opencode-model.js";
 
 // ---------- Config ----------
 const {
@@ -14,6 +15,7 @@ const {
   OPENWA_SESSION_ID, // WhatsApp session UUID needed for MCP tool calls
   OPENCODE_BASE_URL, // e.g. http://opencode:4096
   OPENCODE_AGENT, // optional named agent/mode to use for this bot
+  OPENCODE_MODEL, // optional model override, e.g. "opencode/beam-free"
   OPENCODE_SERVER_USERNAME = "opencode",
   OPENCODE_SERVER_PASSWORD = "", // Basic auth for `opencode serve` when OPENCODE_SERVER_PASSWORD is set there
   KEEP_SESSIONS, // if set, don't delete sessions after each message (for debugging)
@@ -28,6 +30,15 @@ if (!OPENWA_BASE_URL || !OPENWA_SESSION_ID || !OPENCODE_BASE_URL) {
   console.error(
     "OPENWA_BASE_URL, OPENWA_SESSION_ID, and OPENCODE_BASE_URL are required",
   );
+  process.exit(1);
+}
+
+// Optional model override, e.g. "opencode/beam-free" or "provider/model#variant".
+let openCodeModel = null;
+try {
+  openCodeModel = parseOpenCodeModel(OPENCODE_MODEL);
+} catch (err) {
+  console.error(err.message);
   process.exit(1);
 }
 
@@ -174,6 +185,7 @@ async function createSession(chatId) {
     body: JSON.stringify({
       title: `wa:${chatId}:${Date.now()}`,
       ...(OPENCODE_AGENT ? { agent: OPENCODE_AGENT } : {}),
+      ...(openCodeModel ? { model: openCodeModel } : {}),
     }),
   });
   if (!res.ok) throw new Error(`opencode session create failed: ${res.status}`);
@@ -444,7 +456,12 @@ app.post("/webhook/wa-message", async (req, res) => {
   let sessionId;
   try {
     sessionId = await createSession(chatId);
-    log("session created", { chatId, sessionId });
+    log("session created", {
+      chatId,
+      sessionId,
+      agent: OPENCODE_AGENT || null,
+      model: openCodeModel,
+    });
     const prompt = buildPrompt({ chatId, sender, text, quotedMessageId, quotedBody });
     const { sentText, usedSendTool, responseKind } = await withTimeout(
       promptOpencode(sessionId, prompt),
