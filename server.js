@@ -1,7 +1,7 @@
 import express from "express";
 import fs from "fs";
 import path from "path";
-import { Agent } from "undici";
+import { Agent, fetch } from "undici";
 import { buildPrompt } from "./prompt.js";
 import { isAllowed, isLidJid, phoneFromJid } from "./sender-allowlist.js";
 import { hasSendTool, latestAssistantText } from "./opencode-response.js";
