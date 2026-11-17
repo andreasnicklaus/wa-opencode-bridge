@@ -8,7 +8,7 @@
     "test": "node --test"
   },
   "engines": {
-    "node": "v26.13.0"
+    "node": "26.13.1"
   },
   "dependencies": {
     "undici": "8.12.4",
